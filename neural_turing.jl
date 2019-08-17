@@ -115,8 +115,8 @@ end
 
 (reader::Reader)(input, memory) =
 begin
-    focused = softmax(reader.read_focus(input))
-    memory_attended = sum([focus * location for (focus, location) in zip(focused, memory)])
+    attentions = (reader.read_focus(input).+1)./2
+    memory_attended = sum([location .* attention for (attention, location) in zip(attentions, memory)])
 
 memory_attended
 end
@@ -131,12 +131,11 @@ end
 
 (writer::Writer)(output, key, importance, memory) =
 begin
-    new_memory = importance .* writer.memory_creator(output)
+    new_memory = writer.memory_creator(output) .* importance
     memory_normalized = normalize.(memory)
     key_normalized = normalize(key)
-    distances = [sum(key .* location_normalized) for location_normalized in memory_normalized]
-    attendeds = softmax(distances)
-    memory = [(1 .- importance) .* location + new_memory .* attention for (location, attention) in zip(memory, attendeds)]
+    attentions = softmax([sum(key_normalized .* location_normalized) for location_normalized in memory_normalized])
+    memory = [location .* ((1 .- importance) * attention) + new_memory .* attention for (location, attention) in zip(memory, attentions)]
 
 memory
 end
@@ -156,8 +155,8 @@ end
 
 (model::Model)(input, memory) =
 begin
-    focused_memory = model.reader(input, memory)
-    output, key, importance = model.processor(input, focused_memory)
+    memory_attended = model.reader(input, memory)
+    output, key, importance = model.processor(input, memory_attended)
     new_memory = model.writer(output, key, importance, memory)
 
 output, new_memory
