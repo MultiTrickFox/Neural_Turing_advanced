@@ -131,11 +131,11 @@ end
 
 (writer::Writer)(output, key, importance, memory) =
 begin
-    new_memory = writer.memory_creator(output) .* importance
+    new_data = writer.memory_creator(output) .* importance
     memory_normalized = normalize.(memory)
     key_normalized = normalize(key)
     attentions = softmax([sum(key_normalized .* location_normalized) for location_normalized in memory_normalized])
-    memory = [location .* ((1 .- importance) * attention) + new_memory .* attention for (location, attention) in zip(memory, attentions)]
+    memory = [location .* ((1 .- importance) * (1 .- attention)) + new_data .* attention for (location, attention) in zip(memory, attentions)]
 
 memory
 end
