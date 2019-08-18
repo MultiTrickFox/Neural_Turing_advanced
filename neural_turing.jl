@@ -10,6 +10,8 @@ out_size      = 12
 memory_size   = 128
 location_size = 32
 
+hm_readers    = 1
+hm_writers    = 1
 
 Layer_Type    = :FeedForward
 
@@ -115,7 +117,7 @@ end
 
 (reader::Reader)(input, memory) =
 begin
-    attentions = (reader.read_focus(input).+1)./2
+    attentions = softmax(reader.read_focus(input)) # (reader.read_focus(input).+1)./2
     memory_attended = sum([location .* attention for (attention, location) in zip(attentions, memory)])
 
 memory_attended
@@ -131,33 +133,41 @@ end
 
 (writer::Writer)(output, key, importance, memory) =
 begin
-    new_data = writer.memory_creator(output) .* importance
+    new_data = writer.memory_creator(output)
     memory_normalized = normalize.(memory)
     key_normalized = normalize(key)
-    attentions = softmax([sum(key_normalized .* location_normalized) for location_normalized in memory_normalized])
-    memory = [location .* ((1 .- importance) * (1 .- attention)) + new_data .* attention for (location, attention) in zip(memory, attentions)]
 
-memory
+    @show size(vcat([key_normalized .* location_normalized for location_normalized in memory_normalized]...))
+
+    # attentions = sum(softmax(vcat([key_normalized .* location_normalized for location_normalized in memory_normalized]...),dims=1),dims=2)
+
+    attentions = softmax([sum(key_normalized .* location_normalized) for location_normalized in memory_normalized])
+
+    @show attentions
+
+    new_memory = [location .* ((1 .- importance) .* (1 .- attention)) + new_data .* (importance .* attention) for (location, attention) in zip(memory, attentions)]
+
+new_memory
 end
 
 
 mutable struct Model
     processor::Processor
-    reader::Reader
-    writer::Writer
+    readers::Array{Reader}
+    writers::Array{Writer}
 
 Model(in_size, hidden_size, out_size, memory_size, location_size) = new(
     Processor(in_size, hidden_size, out_size, location_size),
-    Reader(in_size, location_size),
-    Writer(out_size, location_size),
+    [Reader(in_size, location_size) for _ in 1:hm_readers],
+    [Writer(out_size, location_size) for _ in 1:hm_writers],
 )
 end
 
 (model::Model)(input, memory) =
 begin
-    memory_attended = model.reader(input, memory)
+    memory_attended = sum([reader(input, memory) for reader in model.readers]) ./ hm_readers
     output, key, importance = model.processor(input, memory_attended)
-    new_memory = model.writer(output, key, importance, memory)
+    new_memory = sum([writer(output, key, importance, memory) for writer in model.writers]) ./ hm_writers
 
 output, new_memory
 end
@@ -192,7 +202,7 @@ end
 ##TESTS
 
 model = Model(in_size, hidden_size, out_size, memory_size, location_size)
-memory = [zeros(1, location_size) for _ in 1:memory_size]
+memory = [randn(1, location_size) for _ in 1:memory_size]
 
 sample_input = randn(1, in_size)
 sample_output = randn(1, out_size)
@@ -201,6 +211,6 @@ output, new_memory = model(sample_input, memory)
 
 ##TESTS2
 
-sample_timeserie = [randn(1, in_size) for _ in 1:10]
+sample_timeserie = [randn(1, in_size) for _ in 1:3]
 
-response = propogate_timeseries(sample_timeserie, model)
+response = propogate_timeseries(sample_timeserie, model, memory=memory)
