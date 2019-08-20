@@ -87,65 +87,63 @@ Layer = eval(Layer_Type)
 mutable struct Processor
     layer_in::Layer
     layer_out::Layer
-    key_creator::Layer
-    importance_creator::Layer
+    read_key::Layer
+    write_key::Layer
 
-Processor(in_size, hidden_size, out_size, location_size) = new(
-    Layer(in_size+location_size, hidden_size),
-    Layer(hidden_size          , out_size),
-    Layer(out_size             , location_size),
-    Layer(out_size             , 1),
+Processor(in_size, hidden_size, out_size, location_size, hm_readers) = new(
+    Layer(in_size+location_size*hm_readers, hidden_size),
+    Layer(hidden_size                     , out_size),
+    Layer(out_size                        , location_size),
+    Layer(out_size                        , location_size),
 )
 end
 
 (processor::Processor)(input, memory_attended) =
 begin
     output = processor.layer_out(processor.layer_in(hcat(input, memory_attended)))
-    key = processor.key_creator(output)
-    importance = (processor.importance_creator(output).+1)./2
+    read_key = processor.read_key(output)
+    write_key = processor.write_key(output)
 
-output, key, importance
+output, read_key, write_key
 end
 
 mutable struct Reader
-    read_focus::Layer
+    location_attend::Layer
 
-Reader(in_size, location_size) = new(
-    Layer(in_size, memory_size)
+Reader(location_size) = new(
+    Layer(location_size*2, 1),
 )
 end
 
-(reader::Reader)(input, memory) =
+(reader::Reader)(read_key, memory) =
 begin
-    attentions = softmax(reader.read_focus(input)) # (reader.read_focus(input).+1)./2
-    memory_attended = sum([location .* attention for (attention, location) in zip(attentions, memory)])
+    memory_attentions = softmax([reader.location_attend(hcat(read_key, location))[end] for location in memory])
+    memory_attended = sum([location .* attention for (location, attention) in zip(memory, memory_attentions)])
 
 memory_attended
 end
 
 mutable struct Writer
     memory_creator::Layer
+    location_attend::Layer
+    location_free::Layer
+    location_alloc::Layer
 
 Writer(out_size, location_size) = new(
     Layer(out_size, location_size),
+    Layer(location_size*2, 1),
+    Layer(location_size*2, location_size),
+    Layer(location_size*2, location_size),
 )
 end
 
-(writer::Writer)(output, key, importance, memory) =
+(writer::Writer)(output, memory, write_key) =
 begin
     new_data = writer.memory_creator(output)
-    memory_normalized = normalize.(memory)
-    key_normalized = normalize(key)
-
-    @show size(vcat([key_normalized .* location_normalized for location_normalized in memory_normalized]...))
-
-    # attentions = sum(softmax(vcat([key_normalized .* location_normalized for location_normalized in memory_normalized]...),dims=1),dims=2)
-
-    attentions = softmax([sum(key_normalized .* location_normalized) for location_normalized in memory_normalized])
-
-    @show attentions
-
-    new_memory = [location .* ((1 .- importance) .* (1 .- attention)) + new_data .* (importance .* attention) for (location, attention) in zip(memory, attentions)]
+    memory_attentions = softmax([writer.location_attend(hcat(write_key, location))[end] for location in memory])
+    free_attentions = [writer.location_free(hcat(write_key, location)) for location in memory]
+    alloc_attentions = [writer.location_alloc(hcat(write_key, location)) for location in memory]
+    new_memory = [location .* (1 .- attention_location) .* (1 .- attention_free) .+ new_data .* attention_location .* attention_alloc for (location, attention_location, attention_free, attention_alloc) in zip(memory, memory_attentions, free_attentions, alloc_attentions)]
 
 new_memory
 end
@@ -156,29 +154,30 @@ mutable struct Model
     readers::Array{Reader}
     writers::Array{Writer}
 
-Model(in_size, hidden_size, out_size, memory_size, location_size) = new(
-    Processor(in_size, hidden_size, out_size, location_size),
-    [Reader(in_size, location_size) for _ in 1:hm_readers],
+Model(in_size, hidden_size, out_size, memory_size, location_size, hm_readers, hm_writers) = new(
+    Processor(in_size, hidden_size, out_size, location_size, hm_readers),
+    [Reader(location_size) for _ in 1:hm_readers],
     [Writer(out_size, location_size) for _ in 1:hm_writers],
 )
 end
 
-(model::Model)(input, memory) =
+(model::Model)(input, memory, read_key) =
 begin
-    memory_attended = sum([reader(input, memory) for reader in model.readers]) ./ hm_readers
-    output, key, importance = model.processor(input, memory_attended)
-    new_memory = sum([writer(output, key, importance, memory) for writer in model.writers]) ./ hm_writers
+    memory_attended = sum([reader(read_key, memory) for reader in model.readers]) ./ hm_readers
+    output, read_key, write_key = model.processor(input, memory_attended)
+    new_memory = sum([writer(output, memory, write_key) for writer in model.writers]) ./ hm_writers
 
-output, new_memory
+output, new_memory, read_key
 end
 
-propogate_timeseries(sequence, model; memory=nothing) =
+propogate_timeseries(sequence, model; memory=nothing, read_key=nothing) =
 begin
     memory == nothing ? memory = [zeros(1, location_size) for _ in 1:memory_size] : ()
+    read_key == nothing ? read_key = randn(1, location_size) : ()
 
     response = []
     for timestep in sequence
-        output, memory = model(timestep, memory)
+        output, memory, read_key = model(timestep, memory, read_key)
         push!(response, output)
     end
 
@@ -201,13 +200,13 @@ end
 
 ##TESTS
 
-model = Model(in_size, hidden_size, out_size, memory_size, location_size)
+model = Model(in_size, hidden_size, out_size, memory_size, location_size, hm_readers, hm_writers)
 memory = [randn(1, location_size) for _ in 1:memory_size]
 
 sample_input = randn(1, in_size)
 sample_output = randn(1, out_size)
 
-output, new_memory = model(sample_input, memory)
+output, new_memory = model(sample_input, memory, randn(1,location_size))
 
 ##TESTS2
 
