@@ -10,7 +10,7 @@ out_size      = 12
 memory_size   = 128
 location_size = 32
 
-hm_readers    = 1
+hm_readers    = 2
 hm_writers    = 1
 
 Layer_Type    = :FeedForward
@@ -163,7 +163,7 @@ end
 
 (model::Model)(input, memory, read_key) =
 begin
-    memory_attended = sum([reader(read_key, memory) for reader in model.readers]) ./ hm_readers
+    memory_attended = hcat([reader(read_key, memory) for reader in model.readers]...)
     output, read_key, write_key = model.processor(input, memory_attended)
     new_memory = sum([writer(output, memory, write_key) for writer in model.writers]) ./ hm_writers
 
