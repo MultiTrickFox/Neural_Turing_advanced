@@ -14,6 +14,7 @@ hm_readers    = 2
 hm_writers    = 1
 
 Layer_Type    = :FeedForward
+Gate_Type     = :tanh # sigm only free/alloc, tanh reinforces too
 
 
 
@@ -26,6 +27,7 @@ begin
         arr
     end
 end
+
 
 
 mutable struct Recurrent
@@ -63,6 +65,9 @@ layer.state = Param(keep .* interm + (1 .- keep) .* layer.state)
 end
 
 
+Layer, gate = eval(Layer_Type), eval(Gate_Type)
+
+
 mutable struct FeedForward
     w::Param
     b::Param
@@ -76,12 +81,9 @@ end
 (layer::FeedForward)(in) =
 begin
 
-tanh.(in * layer.w + layer.b)
+gate.(in * layer.w + layer.b)
 end
 
-
-
-Layer = eval(Layer_Type)
 
 
 mutable struct Processor
@@ -143,10 +145,12 @@ begin
     memory_attentions = softmax([writer.location_attend(hcat(write_key, location))[end] for location in memory])
     free_attentions = [writer.location_free(hcat(write_key, location)) for location in memory]
     alloc_attentions = [writer.location_alloc(hcat(write_key, location)) for location in memory]
-    new_memory = [location .* (1 .- attention_location) .* (1 .- attention_free) .+ new_data .* attention_location .* attention_alloc for (location, attention_location, attention_free, attention_alloc) in zip(memory, memory_attentions, free_attentions, alloc_attentions)]
+    new_memory = [(1 .- attention) .* location + (attention) .* (location .* free + new_data .* alloc) for (location, attention, free, alloc) in zip(memory, memory_attentions, free_attentions, alloc_attentions)]
+    # [location .* (1 .- location_attention) .* (1 .- free_attention) .+ new_data .* location_attention .* alloc_attention for (location, attention, free, alloc) in zip(memory, memory_attentions, free_attentions, alloc_attentions)]
 
 new_memory
 end
+
 
 
 mutable struct Model
@@ -170,6 +174,8 @@ begin
 output, new_memory, read_key
 end
 
+
+
 propogate_timeseries(sequence, model; memory=nothing, read_key=nothing) =
 begin
     memory == nothing ? memory = [zeros(1, location_size) for _ in 1:memory_size] : ()
@@ -178,6 +184,7 @@ begin
     response = []
     for timestep in sequence
         output, memory, read_key = model(timestep, memory, read_key)
+        @show memory[end]
         push!(response, output)
     end
 
@@ -201,7 +208,7 @@ end
 ##TESTS
 
 model = Model(in_size, hidden_size, out_size, memory_size, location_size, hm_readers, hm_writers)
-memory = [randn(1, location_size) for _ in 1:memory_size]
+memory = [zeros(1, location_size) for _ in 1:memory_size]
 
 sample_input = randn(1, in_size)
 sample_output = randn(1, out_size)
@@ -210,6 +217,6 @@ output, new_memory = model(sample_input, memory, randn(1,location_size))
 
 ##TESTS2
 
-sample_timeserie = [randn(1, in_size) for _ in 1:3]
+sample_timeserie = [randn(1, in_size) for _ in 1:5]
 
 response = propogate_timeseries(sample_timeserie, model, memory=memory)
