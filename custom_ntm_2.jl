@@ -6,6 +6,7 @@ in_size       = 12
 hidden_size   = 20
 out_size      = 10
 
+state_size    = 10
 memory_size   = 20
 location_size = 64
 
@@ -13,65 +14,36 @@ location_size = 64
 
 mutable struct Model
 
+    intermediate_state::Param
 
-    read_key_data::Param
-    read_key_func::Param
-    read_data_similarity::Param
-    read_func_similarity::Param
+    mem_attend_value::Param
+    mem_attend_func::Param
 
-    read_intensity_data::Param
-    read_intensity_func::Param
-    read_as_data::Param
-    read_as_func::Param
-
-    func_finalize::Param
-    hidden_layer::Param
+    hidden_state::Param
 
     output::Param
-    data_out::Param
-    func_out::Param
+    final_state::Param
+
+    out_value::Param
+    out_func::Param
+
+    alloc_val::Param
+    dealloc_val::Param
+    alloc_fn::Param
+    dealloc_fn::Param
 
 
-    write_key_data::Param
-    write_key_func::Param
-    write_data_similarity::Param
-    write_func_similarity::Param
+Model(in_size, hidden_size, out_size, state_size, location_size) = new(
 
-    write_intensity_data::Param
-    write_intensity_func::Param
+    Param(randn(in_size+state_size, state_size)),
 
-    alloc_data::Param
-    free_data::Param
-    alloc_func::Param
-    free_func::Param
+    Param(randn(state_size+location_size, 1)),
+    Param(randn(state_size+location_size, 1)),
 
-
-Model(in_size, hidden_size, out_size, location_size) = new(
-
-
-    Param(randn(in_size, location_size)),
-    Param(randn(in_size, location_size)),
-    Param(randn(location_size*2, 1)),
-    Param(randn(location_size*2, 1)),
-
-    Param(randn(in_size, location_size)),
-    Param(randn(in_size, location_size)),
-    Param(randn(in_size+location_size, 1)),
-    Param(randn(in_size+location_size, 1)),
-
-
-    Param(randn(in_size+location_size, in_size)),
-    Param(randn(in_size*2+location_size, hidden_size)),
+    Param(randn(in_size+location_size, hidden_size)),
 
     Param(randn(hidden_size, out_size)),
-    Param(randn(hidden_size, location_size)),
-    Param(randn(hidden_size, location_size)),
-
-
-    Param(randn(hidden_size, location_size)),
-    Param(randn(hidden_size, location_size)),
-    Param(randn(location_size*2, 1)),
-    Param(randn(location_size*2, 1)),
+    Param(randn(hidden_size, state_size)),
 
     Param(randn(hidden_size, location_size)),
     Param(randn(hidden_size, location_size)),
@@ -84,78 +56,54 @@ Model(in_size, hidden_size, out_size, location_size) = new(
 )
 end
 
-(model::Model)(in, memory) =
+(model::Model)(in, state, memory) =
 begin
 
+    values, funcs = memory
 
-    data, funcs = memory
+    intermediate_state = tanh.(hcat(in, state) * model.intermediate_state)
+    val_attentions = softmax([(hcat(intermediate_state, location) * model.mem_attend_value)[end] for location in values])
+    fn_attentions  = softmax([(hcat(intermediate_state, location) * model.mem_attend_func)[end] for location in funcs])
+    attended_val = sum([location .* attention for (location, attention) in zip(values, val_attentions)])
+    attended_fn = sum([location .* attention for (location, attention) in zip(funcs, val_attentions)])
 
+    hidden_input = hcat(in, attended_val .* attended_fn)
+    hidden_state = tanh.(hidden_input * model.hidden_state)
 
-    read_key_data = in * model.read_key_data
-    read_key_func = in * model.read_key_func
-    attentions_data = softmax([(hcat(location, read_key_data) * model.read_data_similarity)[1] for location in data])
-    attentions_funcs = softmax([(hcat(location, read_key_func) * model.read_func_similarity)[1] for location in funcs])
-    attended_data = sum([location .* attention for (location, attention) in zip(data, attentions_data)])
-    attended_func = sum([location .* attention for (location, attention) in zip(funcs, attentions_funcs)])
+    output = tanh.(hidden_state * model.output)
+    final_state = tanh.(hidden_state * model.final_state)
 
-    read_intensity_data = in * model.read_intensity_data
-    read_intensity_func = in * model.read_intensity_func
-    read_as_data = hcat(in, attended_data) * model.read_as_data
-    read_as_func = hcat(in, attended_func) * model.read_as_func
+    out_value = tanh.(hidden_state * model.out_value)
+    out_func = tanh.(hidden_state * model.out_func)
 
+    val_attentions = softmax([(hcat(final_state, location) * model.mem_attend_value)[end] for location in values])
+    fn_attentions  = softmax([(hcat(final_state, location) * model.mem_attend_func)[end] for location in funcs])
 
-    data_for_hidden = attended_data .* read_intensity_data
-    func_for_hidden = hcat(in, attended_func .* read_intensity_func) * model.func_finalize
+    val_allocs = [sigm.(hcat(out_value, location) * model.alloc_val) for location in values]
+    val_deallocs = [sigm.(hcat(out_value, location) * model.dealloc_val) for location in values]
+    fn_allocs = [sigm.(hcat(out_value, location) * model.alloc_fn) for location in funcs]
+    fn_deallocs = [sigm.(hcat(out_value, location) * model.dealloc_fn) for location in funcs]
 
-    data_to_hidden = data_for_hidden .* read_as_data
-    func_to_hidden = in .* func_for_hidden .* read_as_func
-
-    hidden = hcat(in, data_to_hidden, func_to_hidden) * model.hidden_layer
-
-    output = hidden * model.output
-    data_out = hidden * model.data_out
-    func_out = hidden * model.func_out
-
-
-    write_key_data = hidden * model.write_key_data
-    write_key_func = hidden * model.write_key_func
-    attentions_data = softmax([(hcat(location, write_key_data) * model.write_data_similarity)[1] for location in data])
-    attentions_funcs = softmax([(hcat(location, write_key_func) * model.write_func_similarity)[1] for location in funcs])
-    attended_data = sum([location .* attention for (location, attention) in zip(data, attentions_data)])
-    attended_func = sum([location .* attention for (location, attention) in zip(funcs, attentions_funcs)])
-
-    write_intensity_data = hidden * model.write_intensity_data
-    write_intensity_func = hidden * model.write_intensity_func
-
-    alloc_data = hcat(attended_data, data_out) * model.alloc_data
-    free_data = hcat(attended_data, data_out) * model.free_data
-    alloc_func = hcat(attended_func, func_out) * model.alloc_func
-    free_func = hcat(attended_func, func_out) * model.free_func
+    new_values = [(1 .- val_attention) * location + val_attention * (val_dealloc .* location + val_alloc .* out_value) for (location, val_attention, val_dealloc, val_alloc) in zip(values, val_attentions, val_deallocs, val_deallocs)]
+    new_funcs = [(1 .- fn_attention) * location + fn_attention * (fn_dealloc .* location + fn_alloc .* out_func) for (location, fn_attention, fn_dealloc, fn_alloc) in zip(funcs, fn_attentions, fn_deallocs, fn_deallocs)]
+    new_memory = (new_values, new_funcs)
 
 
-    data_to_memory = data_out .* write_intensity_data .* alloc_data
-    func_to_memory = func_out .* write_intensity_func .* alloc_func
-
-
-    new_data = [(1 .- attention) .* location + attention .* (location .* (1 .- free_data) + data_to_memory)
-            for (location, attention) in zip(data, attentions_data)]
-    new_funcs = [(1 .- attention) .* location + attention .* (location .* (1 .- free_func) + func_to_memory)
-            for (location, attention) in zip(funcs, attentions_funcs)]
-
-
-
-output, (new_data, new_funcs)
-
+output, final_state, new_memory
 end
 
 
 
 in = randn(1, in_size)
-
-model = Model(in_size, hidden_size, out_size, location_size)
-
+state = randn(1, state_size)
 memory = [[randn(1, location_size) for _ in 1:memory_size] for _ in 1:2]
 
 
+model = Model(in_size, hidden_size, out_size, state_size, location_size)
 
-out, memory = model(in, memory)
+
+@show state
+
+in, state, memory = model(in, state, memory)
+
+@show state
